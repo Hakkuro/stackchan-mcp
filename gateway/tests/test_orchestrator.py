@@ -539,3 +539,63 @@ async def test_pipeline_disconnect_before_tts_start(fake_encode):
             registry=reg,
         )
     assert esp32.tts_states == ["start"]
+
+
+def test_split_into_sentences_helper():
+    """Verify that split_into_sentences splits correctly and avoids decimals."""
+    from stackchan_mcp.tts.orchestrator import split_into_sentences
+
+    res = split_into_sentences("你好！我是机器人。你今天怎么样？")
+    assert res == ["你好！", "我是机器人。", "你今天怎么样？"]
+
+    res = split_into_sentences("This is 3.5. Hello.")
+    assert res == ["This is 3.5.", "Hello."]
+
+    res = split_into_sentences("No punctuation")
+    assert res == ["No punctuation"]
+
+
+def test_split_and_merge_sentences_helper():
+    """Verify that split_and_merge_sentences merges adjacent short sentences correctly."""
+    from stackchan_mcp.tts.orchestrator import split_and_merge_sentences
+
+    # English with spaces
+    res = split_and_merge_sentences("Hello! Yes. Good. This is a longer sentence.", min_length=15)
+    assert res == ["Hello! Yes. Good.", "This is a longer sentence."]
+
+    # CJK without spaces
+    res = split_and_merge_sentences("你好！是的。好的。这是一个比较长的句子。", min_length=8)
+    assert res == ["你好！是的。好的。", "这是一个比较长的句子。"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_multi_sentence_synthesis_and_pacing(fake_encode):
+    """Multiple sentences are synthesized and streamed within a single start/stop sequence."""
+    # 90 ms of PCM = 1440 samples = 2880 bytes -> 2 Opus frames
+    pcm = b"\x01\x00" * 1440
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "こんにちは、私は元気いっぱいでございます！よろしくお願いいたします。", "voice": "voicevox"},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    # 2 sentences synthesized -> each produces 2 frames -> 4 frames total
+    assert result["frame_count"] == 4
+    assert result["text"] == "こんにちは、私は元気いっぱいでございます！よろしくお願いいたします。"
+    assert len(engine.calls) == 2
+    assert engine.calls[0][0] == "こんにちは、私は元気いっぱいでございます！"
+    assert engine.calls[1][0] == "よろしくお願いいたします。"
+
+    # Start and stop called exactly once
+    assert esp32.tts_states == ["start", "stop"]
+    # 4 frames received by device
+    assert len(esp32.frames) == 4
+
+

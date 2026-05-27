@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,70 @@ from .base import EngineRegistry, get_registry
 
 if TYPE_CHECKING:
     from ..gateway import Gateway
+
+
+def split_into_sentences(text: str) -> list[str]:
+    """Split input text into sentences using punctuation markers.
+
+    Avoids splitting decimals like 3.5 by ensuring dots are followed by whitespace or end of string.
+    """
+    parts = re.split(r'([。！？\n\?\!]|\.(?=\s|$))', text)
+    sentences = []
+    current_sentence = ""
+    for part in parts:
+        if part is None:
+            continue
+        current_sentence += part
+        if part in ("。", "！", "？", "\n", "?", "!", "."):
+            stripped = current_sentence.strip()
+            if stripped:
+                sentences.append(stripped)
+            current_sentence = ""
+    if current_sentence.strip():
+        sentences.append(current_sentence.strip())
+
+    if not sentences and text.strip():
+        sentences.append(text.strip())
+
+    return sentences
+
+
+def split_and_merge_sentences(text: str, min_length: int = 15) -> list[str]:
+    """Split input text into sentences and merge adjacent short sentences.
+
+    Avoids sending too many tiny requests to the TTS engine.
+    """
+    def is_cjk(c: str) -> bool:
+        return any(
+            0x3000 <= ord(char) <= 0x9FFF or 0xFF00 <= ord(char) <= 0xFFEF
+            for char in c
+        )
+
+    raw_sentences = split_into_sentences(text)
+    merged_sentences = []
+    current = ""
+    for s in raw_sentences:
+        if current:
+            # Check if it's CJK characters or english, to decide spacing
+            # Since we split with space/punctuation, let's keep space for English but no space for CJK
+            # To be simple and robust, we check if the last char of current is CJK
+            # CJK Unicode range is generally \u4e00-\u9fff, \u3040-\u30ff (Kana), etc.
+            # We can use a simple regex or check:
+            # Let's keep it simple: if either last character of current or first character of s is CJK, don't use space.
+            # Otherwise use space.
+            if is_cjk(current[-1:]) or is_cjk(s[:1]):
+                current += s
+            else:
+                current += " " + s
+        else:
+            current = s
+        if len(current) >= min_length:
+            merged_sentences.append(current)
+            current = ""
+    if current:
+        merged_sentences.append(current)
+    return merged_sentences
+
 
 #: Delay between the ``tts.start`` notification and the first audio
 #: frame, in seconds. Firmware dispatches the state transition through
@@ -148,57 +213,127 @@ async def synthesize_and_send(
     speaker_id = arguments.get("speaker_id")
     reference_audio = arguments.get("reference_audio")
 
-    # Engine failures (HTTP errors from VOICEVOX, malformed WAV from
-    # the synthesiser, etc.) are translated to RuntimeError so the
-    # MCP layer's narrow exception filter still produces clean error
-    # JSON. Validation errors (ValueError) are kept distinct so bad
-    # arguments stay separable from operational degradation.
-    try:
-        pcm = await engine.synthesize(
-            text,
-            speaker_id=speaker_id,
-            reference_audio=reference_audio,
-        )
-    except ValueError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(
-            f"TTS engine '{voice}' failed: {exc}"
-        ) from exc
+    sentences = split_and_merge_sentences(text)
 
-    if not pcm:
-        # An engine returning no PCM is a bug, not a runtime condition;
-        # surface it to the caller rather than silently sending zero
-        # frames (which would look like the device "ignored" the call).
-        raise RuntimeError(
-            f"Engine '{voice}' produced no PCM data for the given text."
-        )
+    async def process_sentence(s: str) -> list[bytes]:
+        try:
+            pcm = await engine.synthesize(
+                s,
+                speaker_id=speaker_id,
+                reference_audio=reference_audio,
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"TTS engine '{voice}' failed on sentence {s!r}: {exc}"
+            ) from exc
 
-    # Hand the PCM off to the shared encode-and-push path. Engines that
-    # have already resampled to DEVICE_SAMPLE_RATE (the documented
-    # TTSEngine contract) need no further conversion here.
-    result = await send_pcm_audio(
-        gateway,
-        pcm,
-        source_label=f"engine:{voice}",
-    )
+        if not pcm:
+            raise RuntimeError(
+                f"Engine '{voice}' produced no PCM data for sentence {s!r}."
+            )
+
+        try:
+            return list(encode_opus_frames(pcm))
+        except Exception as exc:
+            raise RuntimeError(f"Opus encoding failed: {exc}") from exc
+
+    # Start synthesizing the first sentence immediately
+    s1_task = asyncio.create_task(process_sentence(sentences[0]))
+
+    # Pre-trigger the second sentence synthesis if it exists, running in parallel with S1
+    next_task = None
+    if len(sentences) > 1:
+        next_task = asyncio.create_task(process_sentence(sentences[1]))
+
+    current_frames = await s1_task
+
+    tts_lock = getattr(gateway.esp32, "tts_lock", None)
+    lock_ctx = tts_lock if tts_lock is not None else nullcontext()
+
+    total_sent = 0
+    push_error: ConnectionError | None = None
+
+    async with lock_ctx:
+        try:
+            await gateway.esp32.send_tts_state("start")
+        except ConnectionError as exc:
+            raise RuntimeError(
+                f"Device disconnected before TTS start notification: {exc}"
+            ) from exc
+
+        # Wait for the firmware's state machine to land in
+        # kDeviceStateSpeaking before sending the first frame.
+        await asyncio.sleep(TTS_START_TRANSITION_DELAY_S)
+
+        frame_period_s = DEVICE_FRAME_DURATION_MS / 1000.0
+        loop = asyncio.get_event_loop()
+
+        try:
+            next_send_time = loop.time()
+            for i, sentence in enumerate(sentences):
+                # For i >= 1, we start the next prefetch task. For i == 0, next_task was already created.
+                if i >= 1:
+                    next_task = None
+                    if i + 1 < len(sentences):
+                        next_task = asyncio.create_task(
+                            process_sentence(sentences[i + 1])
+                        )
+
+
+                for frame in current_frames:
+                    now = loop.time()
+                    if now < next_send_time:
+                        await asyncio.sleep(next_send_time - now)
+                    try:
+                        await gateway.esp32.send_audio_frame(frame)
+                    except ConnectionError as exc:
+                        push_error = exc
+                        break
+                    total_sent += 1
+                    next_send_time += frame_period_s
+
+                if push_error:
+                    if next_task:
+                        next_task.cancel()
+                    break
+
+                if next_task:
+                    try:
+                        current_frames = await next_task
+                    except Exception:
+                        raise
+        finally:
+            try:
+                await gateway.esp32.send_tts_state("stop")
+            except ConnectionError:
+                pass
+
+    if push_error is not None:
+        raise RuntimeError(
+            f"Device disconnected after sending "
+            f"{total_sent} frames: {push_error}"
+        ) from push_error
+
+    duration_ms = total_sent * DEVICE_FRAME_DURATION_MS
 
     logger.info(
         "say(): engine=%s speaker=%s frames=%d duration_ms=%d",
         voice,
         speaker_id if speaker_id is not None else "default",
-        result["frame_count"],
-        result["duration_ms"],
+        total_sent,
+        duration_ms,
     )
 
     return {
         "engine": voice,
         "text": text,
         "speaker_id": speaker_id,
-        "frame_count": result["frame_count"],
-        "sample_rate": result["sample_rate"],
-        "frame_duration_ms": result["frame_duration_ms"],
-        "duration_ms": result["duration_ms"],
+        "frame_count": total_sent,
+        "sample_rate": DEVICE_SAMPLE_RATE,
+        "frame_duration_ms": DEVICE_FRAME_DURATION_MS,
+        "duration_ms": duration_ms,
     }
 
 

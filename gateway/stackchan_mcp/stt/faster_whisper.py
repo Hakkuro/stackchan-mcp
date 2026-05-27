@@ -10,6 +10,10 @@ fit on a developer Mac without GPU and accurate enough for short
 Japanese utterances. Override per-call via the ``model`` argument of
 the ``listen`` MCP tool, or globally via the ``STACKCHAN_FASTER_WHISPER_MODEL``
 environment variable.
+
+If the ``HF_ENDPOINT`` environment variable is not explicitly set, this
+engine defaults to ``https://hf-mirror.com`` to ensure fast and reliable
+downloads in Chinese network environments.
 """
 
 from __future__ import annotations
@@ -20,6 +24,10 @@ import os
 import wave
 from io import BytesIO
 from typing import Any
+
+# Set Hugging Face mirror endpoint if not already configured by user
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 # Probe the optional dependency at module import time so a missing
 # extra produces ImportError here, which :mod:`stackchan_mcp.stt`'s
