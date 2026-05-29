@@ -245,6 +245,19 @@ documented-only.
   dropped. Contributed via
   [PR #232](https://github.com/kisaragi-mochi/stackchan-mcp/pull/232).
 
+- Added: Edge TTS engine (`voice="edge-tts"`) — free cloud TTS via
+  Microsoft Edge's online speech service, no API key needed.  Supports
+  300+ voices across 70+ languages (English, Japanese, Chinese, etc.).
+  The engine streams audio from the service, decodes the MP3 payload to
+  16 kHz mono PCM via PyAV (`av`), and feeds it into the existing Opus
+  encode → WebSocket push pipeline.  Install with
+  `pip install stackchan-mcp[tts-edge]`.  Default voice is
+  `ja-JP-NanamiNeural`; override per-call via `speaker_id` (e.g.
+  `"en-US-AriaNeural"`) or globally via the
+  `STACKCHAN_EDGE_TTS_VOICE` environment variable.  Rate and volume
+  modifiers are configurable via `STACKCHAN_EDGE_TTS_RATE` /
+  `STACKCHAN_EDGE_TTS_VOLUME`.
+
 - Added: the gateway now advertises `_stackchan-mcp._tcp.local.` over mDNS/DNS-SD by default so fresh firmware can discover the WebSocket endpoint on the local network. A new `--no-mdns` flag disables advertising.
 
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper

@@ -40,18 +40,25 @@ dependencies = [
 
 [project.optional-dependencies]
 # Phase 4 TTS — see Issue #70.
-# Concrete engines (VOICEVOX, Irodori) consume these libraries:
+# Concrete engines consume these libraries:
 #   * httpx     — VOICEVOX HTTP engine client
 #   * opuslib   — Opus encoding for the device's audio decoder
 # `tts-voicevox` is a no-op alias provided so users can declare intent
 # explicitly; the VOICEVOX engine itself is an external HTTP process and
 # adds no Python dependencies of its own.
+# `tts-edge` adds the edge-tts (Microsoft Edge free cloud TTS) engine
+# with av (PyAV) for MP3 decoding — no API key needed.
 tts = [
     "httpx>=0.27",
     "opuslib>=3",
 ]
 tts-voicevox = [
     "stackchan-mcp[tts]",
+]
+tts-edge = [
+    "stackchan-mcp[tts]",
+    "edge-tts>=6.1",
+    "av>=12",
 ]
 
 # Phase 4 STT — see Issue #91.

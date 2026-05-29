@@ -454,12 +454,14 @@ def create_server() -> Server:
                     "TTS (Phase 4, Issue #70). The gateway synthesises audio, "
                     "encodes it to Opus, and pushes frames over the existing "
                     "WebSocket — the device firmware does not change. Engine is "
-                    "selectable via 'voice' (default 'voicevox'). "
-                    "NOTE: this build ships the framework only; concrete engines "
-                    "(VOICEVOX, Irodori) land in follow-up PRs and require the "
-                    "matching optional extra (e.g. "
-                    "'pip install stackchan-mcp[tts-voicevox]'). Calling this tool "
-                    "before an engine is registered returns a clear error."
+                    "selectable via 'voice': "
+                    "'voicevox' (default, requires a running VOICEVOX HTTP engine; "
+                    "install 'pip install stackchan-mcp[tts-voicevox]'), "
+                    "'edge-tts' (free Microsoft Edge cloud TTS, no API key; "
+                    "install 'pip install stackchan-mcp[tts-edge]'). "
+                    "For edge-tts, 'speaker_id' selects the voice name "
+                    "(e.g. 'en-US-AriaNeural', 'ja-JP-NanamiNeural', "
+                    "'zh-CN-XiaoxiaoNeural'); omit it to use the engine default."
                 ),
                 inputSchema={
                     "type": "object",
@@ -471,16 +473,18 @@ def create_server() -> Server:
                         "voice": {
                             "type": "string",
                             "description": (
-                                "Engine identifier (e.g. 'voicevox', 'irodori'). "
-                                "Default 'voicevox'."
+                                "Engine identifier. "
+                                "'voicevox' (default) or 'edge-tts'."
                             ),
                             "default": "voicevox",
                         },
                         "speaker_id": {
-                            "type": "integer",
+                            "type": "string",
                             "description": (
-                                "Engine-specific speaker identifier "
-                                "(e.g. a VOICEVOX speaker ID)."
+                                "Engine-specific speaker selector. "
+                                "For VOICEVOX: integer speaker ID (e.g. '3'). "
+                                "For edge-tts: voice name string "
+                                "(e.g. 'en-US-AriaNeural')."
                             ),
                         },
                         "reference_audio": {
